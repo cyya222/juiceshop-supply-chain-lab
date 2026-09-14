@@ -21,21 +21,15 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
       # 1. Install dependencies so node_modules exists
       - name: Install Dependencies
         run: npm install --legacy-peer-deps --ignore-scripts
 
-      # 2. Install Syft, Grype CLIs, and Python PDF generation library
-      - name: Install Syft, Grype, and WeasyPrint
+      # 2. Install Syft and Grype CLIs directly (bypasses GitHub Action wrapper bugs)
+      - name: Install Syft and Grype CLIs
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-          pip install weasyprint
 
       # 3. Force Syft to scan node_modules directly without ignoring gitignored folders
       - name: Generate Full SBOM
@@ -48,142 +42,45 @@ jobs:
           name: juiceshop-sbom
           path: juiceshop.sbom.json
 
-      # 5. Scan the complete SBOM with Grype and output JSON + SARIF
+      # 5. Scan the complete SBOM with Grype and output a valid SARIF file
       - name: Scan SBOM with Grype
-        run: |
-          grype sbom:juiceshop.sbom.json -o json > grype-results.json
-          grype sbom:juiceshop.sbom.json -o sarif > results.sarif
+        run: grype sbom:juiceshop.sbom.json -o sarif > results.sarif
         continue-on-error: true
 
-      # 6. Generate PDF Report matching exact template format
-      - name: Generate PDF Vulnerability Report
-        run: |
-          python -c '
-          import json
-          from weasyprint import HTML
-
-          with open("grype-results.json") as f:
-              data = json.load(f)
-
-          matches = data.get("matches", [])
-          rows_html = ""
-
-          for match in matches:
-              vuln = match.get("vulnerability", {})
-              artifact = match.get("artifact", {})
-              
-              cve_id = vuln.get("id", "N/A")
-              
-              # Find GHSA / Original ID from related vulnerabilities
-              related = vuln.get("relatedVulnerabilities", [])
-              ghsa_id = related[0].get("id", cve_id) if related else cve_id
-              
-              severity = vuln.get("severity", "Unknown").capitalize()
-              pkg_name = artifact.get("name", "N/A")
-              installed_ver = artifact.get("version", "N/A")
-              
-              fix_versions = vuln.get("fix", {}).get("versions", [])
-              fix_ver = ", ".join(fix_versions) if fix_versions else "N/A"
-
-              sev_class = f"severity-{severity.lower()}"
-
-              rows_html += f"""
-              <tr>
-                <td class="cve">{cve_id}</td>
-                <td>{ghsa_id}</td>
-                <td class="{sev_class}">{severity}</td>
-                <td>{pkg_name}</td>
-                <td>{installed_ver}</td>
-                <td>{fix_ver}</td>
-              </tr>
-              """
-
-          html_content = f"""
-          <!DOCTYPE html>
-          <html>
-          <head>
-          <style>
-            @page {{
-              size: A4 portrait;
-              margin: 20mm 15mm;
-              background-color: #ffffff;
-            }}
-            body {{
-              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-              color: #222222;
-              margin: 0;
-              padding: 0;
-            }}
-            h1 {{
-              font-size: 26pt;
-              font-weight: 700;
-              margin-top: 0;
-              margin-bottom: 25px;
-              color: #1a1a1a;
-            }}
-            table {{
-              width: 100%;
-              border-collapse: collapse;
-              font-size: 10pt;
-            }}
-            th {{
-              background-color: #f4f4f5;
-              color: #111111;
-              font-weight: 700;
-              text-align: left;
-              padding: 10px 12px;
-              border: 1px solid #e2e8f0;
-            }}
-            td {{
-              padding: 10px 12px;
-              border: 1px solid #e2e8f0;
-              vertical-align: middle;
-            }}
-            tr:nth-child(even) td {{
-              background-color: #fafafa;
-            }}
-            .severity-high {{ color: #d97706; font-weight: 600; }}
-            .severity-critical {{ color: #dc2626; font-weight: 600; }}
-            .severity-medium {{ color: #ca8a04; font-weight: 600; }}
-            .severity-low {{ color: #2563eb; font-weight: 600; }}
-            .cve {{ font-weight: 600; }}
-          </style>
-          </head>
-          <body>
-            <h1>Grype Vulnerability Report</h1>
-            <table>
-              <thead>
-                <tr>
-                  <th style="width: 20%;">CVE ID</th>
-                  <th style="width: 25%;">GHSA / Original ID</th>
-                  <th style="width: 12%;">Severity</th>
-                  <th style="width: 23%;">Package</th>
-                  <th style="width: 10%;">Installed Version</th>
-                  <th style="width: 10%;">Fix Version</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows_html}
-              </tbody>
-            </table>
-          </body>
-          </html>
-          """
-
-          HTML(string=html_content).write_pdf("Grype_Vulnerability_Report.pdf")
-          '
-
-      # 7. Upload PDF Report Artifact for easy download
-      - name: Upload PDF Report Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: grype-pdf-report
-          path: Grype_Vulnerability_Report.pdf
-
-      # 8. Upload SARIF results to GitHub Security tab
+      # 6. Upload SARIF results to GitHub Security tab
       - name: Upload SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: results.sarif
           category: "grype-sbom"
+          # Install GuardDog via pip 
+      - name: Install GuardDog & jq 
+        run: | 
+          pip3 install guarddog 
+          sudo apt-get install -y jq 
+ 
+     # Parse package.json and run GuardDog scan on each package name 
+      - name: Run GuardDog Dependency Scan 
+        env: 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+        run: | 
+          echo "Extracting dependencies from package.json..." 
+          DEPS=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' package.json) 
+           
+          if [ -z "$DEPS" ]; then 
+            echo "No dependencies found to scan." 
+            exit 0 
+          fi 
+ 
+          echo "Scanning dependencies with GuardDog..." 
+          for dep in $DEPS; do 
+            echo "----------------------------------------" 
+            echo "Scanning package: $dep" 
+            # Use 'scan' for remote npm registry packages 
+            guarddog npm scan "$dep" \ 
+              --exclude-rules metadata_mismatch \ 
+              --exclude-rules potentially_compromised_email_domain \ 
+              --exclude-rules unclaimed_maintainer_email_domain || true 
+          done 
+        continue-on-error: true 
